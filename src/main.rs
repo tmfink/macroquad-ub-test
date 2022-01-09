@@ -9,6 +9,13 @@ use std::cell::UnsafeCell;
 ///
 /// Based on [@Nemo157 comment](issue-53639)
 /// [issue-53639]: https://github.com/rust-lang/rust/issues/53639#issuecomment-790091647
+///
+/// # Safety
+///
+/// Mutable references must never alias (point to the same memory location).
+/// Any previous result from calling this method on a specific instance
+/// **must** be dropped before calling this function again. This applies
+/// even if the mutable refernces lives in the stack frame of another function.
 #[repr(transparent)]
 #[derive(Debug)]
 pub struct RacyCell<T>(UnsafeCell<T>);
@@ -20,21 +27,21 @@ impl<T> RacyCell<T> {
     }
 
     /// Get a shared reference to the inner type.
+    ///
+    /// # Safety
+    /// See [RacyCell]
     #[inline(always)]
     pub unsafe fn get_ref(&self) -> &T {
         &*self.0.get()
     }
 
     /// Get a mutable reference to the inner type.
-    ///
-    /// # Safety
-    ///
-    /// Mutable references must never alias (point to the same memory location).
-    /// Any previous result from calling this method on a specific instance
-    /// **must** be dropped before calling this function again. This applies
-    /// even if the mutable refernces lives in the stack frame of another function.
+    /// Callers should try to restrict the lifetime as much as possible.
     ///
     /// Callers may want to convert this result to a `*mut T` immediately.
+    ///
+    /// # Safety
+    /// See [RacyCell]
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub unsafe fn get_ref_mut(&self) -> &mut T {
@@ -42,12 +49,18 @@ impl<T> RacyCell<T> {
     }
 
     /// Get a const pointer to the inner type
+    ///
+    /// # Safety
+    /// See [RacyCell]
     #[inline(always)]
     pub unsafe fn get_ptr(&self) -> *const T {
         self.0.get()
     }
 
     /// Get a mutable pointer to the inner type
+    ///
+    /// # Safety
+    /// See [RacyCell]
     #[inline(always)]
     pub unsafe fn get_ptr_mut(&self) -> *mut T {
         self.0.get()
@@ -59,7 +72,7 @@ unsafe impl<T> Sync for RacyCell<T> {}
 #[no_mangle]
 static CONTEXT: RacyCell<Option<Context>> = RacyCell::new(None);
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct Context {
     // exposed to user via InternalContext
     quad_context: u32,
@@ -70,6 +83,31 @@ struct Context {
     screen_height: f32,
     mouse_x: f32,
     mouse_y: f32,
+    touches: Vec<Touch>,
+    simulate_mouse_with_touch: bool,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self {
+            quad_context: 0,
+            gl: 0,
+            screen_height: 0.0,
+            screen_width: 0.0,
+            mouse_x: 0.0,
+            mouse_y: 0.0,
+            touches: vec![],
+            simulate_mouse_with_touch: true,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct Touch {
+    is_touch_started: bool,
+    x: f32,
+    y: f32,
 }
 
 /// # Safety
@@ -118,6 +156,47 @@ fn mouse_motion_event(x: f32, y: f32) {
     }
 }
 
+/// Since we call another "macroquad" functions `mouse_motion_event()`, we MUST
+/// drop the `&mut Context` before calling those functions.
+fn touch_event(is_touch_started: bool, x: f32, y: f32) {
+    let simulate_mouse_with_touch = {
+        // SAFETY: no calls to other macroquad functions in scope
+        let context = unsafe { &mut *get_context() };
+
+        context.touches.push(Touch {
+            is_touch_started,
+            x,
+            y,
+        });
+        context.simulate_mouse_with_touch
+    };
+
+    // SAFETY: no mut ref to Context live
+    #[allow(clippy::if_same_then_else)]
+    if simulate_mouse_with_touch {
+        if is_touch_started {
+            //self.mouse_button_down_event(MouseButton::Left, x, y);
+            mouse_motion_event(x, y); // call function that modifies context
+        } else {
+            // self.mouse_button_up_event(MouseButton::Left, x, y);
+            mouse_motion_event(x, y); // call function that modifies context
+        }
+    };
+
+    // SAFETY: no calls to other macroquad functions in scope
+    let context = unsafe { &mut *get_context() };
+
+    // context
+    //     .input_events
+    //     .iter_mut()
+    //     .for_each(|arr| arr.push(MiniquadInputEvent::Touch { phase, id, x, y }));
+    context.touches.push(Touch {
+        is_touch_started,
+        x: 100.0 + x,
+        y: 100.0 + y,
+    });
+}
+
 /******************** window.rs **********************/
 pub struct InternalGlContext {
     pub quad_context: *mut u32,
@@ -162,7 +241,7 @@ fn main() {
     }
 
     // Simulate game loop
-    for _ in 0..5 {
+    for frame in 0..5 {
         let mut gl = unsafe { get_internal_gl() };
         gl.flush();
         unsafe {
@@ -172,6 +251,7 @@ fn main() {
 
         resize_event(1920., 1080.);
         mouse_motion_event(42.0, 84.0);
+        touch_event(true, frame as f32, frame as f32);
         gl.flush();
     }
     unsafe {

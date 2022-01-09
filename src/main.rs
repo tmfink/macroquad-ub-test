@@ -1,6 +1,6 @@
 //! Simulates `get_internal_gl()` in macroquad
 
-use std::{cell::UnsafeCell, marker::PhantomData, mem::MaybeUninit};
+use std::{cell::UnsafeCell, marker::PhantomData};
 
 /******************** lib.rs **********************/
 
@@ -12,6 +12,7 @@ impl<T> RacyCell<T> {
         RacyCell(UnsafeCell::new(value))
     }
 
+    #[allow(clippy::mut_from_ref)]
     unsafe fn get_mut_unchecked(&self) -> &mut T {
         &mut *self.0.get()
     }
@@ -20,27 +21,32 @@ impl<T> RacyCell<T> {
 unsafe impl<T> Sync for RacyCell<T> {}
 
 #[no_mangle]
-//static mut CONTEXT: Option<Context> = None;
-static CONTEXT: RacyCell<MaybeUninit<Context>> = RacyCell::new(MaybeUninit::uninit());
+static CONTEXT: RacyCell<Option<Context>> = RacyCell::new(None);
 
 struct Context {
     quad_context: u32,
     gl: u32,
 }
 
+/// # Safety
+/// Requirements:
+/// - this function must only be called once from the "main" thread
 unsafe fn init_context() {
-    *CONTEXT.get_mut_unchecked() = MaybeUninit::new(Context {
+    *CONTEXT.get_mut_unchecked() = Some(Context {
         quad_context: 0,
         gl: 0,
     })
 }
 
-/// # SAFETY
+/// # Safety
 /// Requirements:
 /// - `init_context()` must be called before this function.
 /// - this function must only be called from the "main" thread
 unsafe fn get_context() -> *mut Context {
-    CONTEXT.get_mut_unchecked().assume_init_mut()
+    match CONTEXT.get_mut_unchecked() {
+        None => panic!(),
+        Some(x) => x,
+    }
 }
 
 impl Context {
@@ -65,6 +71,9 @@ impl<'a> InternalGlContext<'a> {
     }
 }
 
+/// # Safety
+/// Requirements:
+/// - this function must only be called from the "main" thread
 pub unsafe fn get_internal_gl<'a>() -> InternalGlContext<'a> {
     let context = get_context();
 
@@ -93,7 +102,7 @@ fn main() {
     }
 
     // Simulate game loop
-    {
+    for _ in 0..5 {
         let mut gl = unsafe { get_internal_gl() };
         gl.flush();
         unsafe {

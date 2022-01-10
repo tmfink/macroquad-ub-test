@@ -85,6 +85,7 @@ struct Context {
     mouse_y: f32,
     touches: Vec<Touch>,
     simulate_mouse_with_touch: bool,
+    audio_context: AudioContext,
 }
 
 impl Default for Context {
@@ -98,8 +99,14 @@ impl Default for Context {
             mouse_y: 0.0,
             touches: vec![],
             simulate_mouse_with_touch: true,
+            audio_context: Default::default(),
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct AudioContext {
+    sounds: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -224,6 +231,20 @@ pub unsafe fn get_internal_gl() -> InternalGlContext {
     }
 }
 
+/******************** audio.rs **********************/
+
+pub fn load_sound_from_bytes(data: &[u8]) {
+    // SAFETY: no calls to other macroquad functions
+    let context = unsafe { &mut *get_context() };
+
+    let audio_context = &mut context.audio_context;
+    context.mouse_x += 1.0;
+    audio_context.sounds.extend_from_slice(data);
+    context.mouse_x += 1.0;
+    audio_context.sounds.extend_from_slice(data);
+
+}
+
 /******************** use of lib **********************/
 
 fn helper() {
@@ -252,6 +273,7 @@ fn main() {
         resize_event(1920., 1080.);
         mouse_motion_event(42.0, 84.0);
         touch_event(true, frame as f32, frame as f32);
+        load_sound_from_bytes(&[frame, frame]);
         gl.flush();
     }
     unsafe {

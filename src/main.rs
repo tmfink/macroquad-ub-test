@@ -1,27 +1,24 @@
 //! Simulates `get_internal_gl()` in macroquad
 #![deny(unsafe_code)]
 
-use std::ops::{Deref, DerefMut};
-
 /******************** lib.rs **********************/
 
-/// parking_lot Mutext provides Sync and interior mutability
-static CONTEXT: parking_lot::Mutex<Option<Context>> = parking_lot::const_mutex(None);
-
 #[derive(Debug)]
-struct Context {
-    // exposed to user via InternalContext
+pub struct Context {
+    // exposed to user
     pub quad_context: u32,
     pub gl: u32,
 
-    // only accessed directly from library
-    screen_width: f32,
-    screen_height: f32,
-    mouse_x: f32,
-    mouse_y: f32,
-    touches: Vec<Touch>,
-    simulate_mouse_with_touch: bool,
-    audio_context: AudioContext,
+    // only accessed directly from library;
+    // fields could be private if the function are moved into a Context impl
+    // block
+    pub(crate) screen_width: f32,
+    pub(crate) screen_height: f32,
+    pub(crate) mouse_x: f32,
+    pub(crate) mouse_y: f32,
+    pub(crate) touches: Vec<Touch>,
+    pub(crate) simulate_mouse_with_touch: bool,
+    pub(crate) audio_context: AudioContext,
 }
 
 impl Default for Context {
@@ -44,6 +41,11 @@ impl Context {
     pub fn flush(&mut self) {
         self.perform_render_passes();
     }
+
+    pub(crate) fn mouse_motion_event(&mut self, x: f32, y: f32) {
+        self.mouse_x = x;
+        self.mouse_y = y;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -59,18 +61,6 @@ struct Touch {
     y: f32,
 }
 
-fn init_context() {
-    *CONTEXT.lock() = Some(Context::default());
-}
-
-fn get_context() -> impl Deref<Target = Context> + DerefMut {
-    let guard = CONTEXT.lock();
-    parking_lot::MutexGuard::map(guard, |opt| match opt {
-        None => panic!(),
-        Some(ctx) => ctx,
-    })
-}
-
 impl Context {
     pub(crate) fn perform_render_passes(&mut self) {
         self.quad_context += 1;
@@ -78,29 +68,19 @@ impl Context {
     }
 }
 
-fn resize_event(width: f32, height: f32) {
-    let ctx = &mut *get_context();
-
+fn resize_event(context: &mut Context, width: f32, height: f32) {
     //mouse_motion_event(0., 0.);
 
-    ctx.screen_height = height;
-    ctx.screen_width = width;
+    context.screen_height = height;
+    context.screen_width = width;
 
     //mouse_motion_event(0., 0.);
-}
-
-fn mouse_motion_event(x: f32, y: f32) {
-    (*get_context()).mouse_x = x;
-    (*get_context()).mouse_y = y;
 }
 
 /// Since we call another "macroquad" functions `mouse_motion_event()`, we MUST
 /// drop the `&mut Context` before calling those functions.
-fn touch_event(is_touch_started: bool, x: f32, y: f32) {
+fn touch_event(context: &mut Context, is_touch_started: bool, x: f32, y: f32) {
     let simulate_mouse_with_touch = {
-        // SAFETY: no calls to other macroquad functions in scope
-        let context = &mut *get_context();
-
         context.touches.push(Touch {
             is_touch_started,
             x,
@@ -109,20 +89,16 @@ fn touch_event(is_touch_started: bool, x: f32, y: f32) {
         context.simulate_mouse_with_touch
     };
 
-    // SAFETY: no mut ref to Context live
     #[allow(clippy::if_same_then_else)]
     if simulate_mouse_with_touch {
         if is_touch_started {
-            //self.mouse_button_down_event(MouseButton::Left, x, y);
-            mouse_motion_event(x, y); // call function that modifies context
+            //context.mouse_button_down_event(MouseButton::Left, x, y);
+            context.mouse_motion_event(x, y); // call function that modifies context
         } else {
-            // self.mouse_button_up_event(MouseButton::Left, x, y);
-            mouse_motion_event(x, y); // call function that modifies context
+            // context.mouse_button_up_event(MouseButton::Left, x, y);
+            context.mouse_motion_event(x, y); // call function that modifies context
         }
     };
-
-    // SAFETY: no calls to other macroquad functions in scope
-    let context = &mut *get_context();
 
     // context
     //     .input_events
@@ -137,10 +113,7 @@ fn touch_event(is_touch_started: bool, x: f32, y: f32) {
 
 /******************** audio.rs **********************/
 
-pub fn load_sound_from_bytes(data: &[u8]) {
-    // SAFETY: no calls to other macroquad functions
-    let context = &mut *get_context();
-
+pub fn load_sound_from_bytes(context: &mut Context, data: &[u8]) {
     let audio_context = &mut context.audio_context;
     context.mouse_x += 1.0;
     audio_context.sounds.extend_from_slice(data);
@@ -150,30 +123,29 @@ pub fn load_sound_from_bytes(data: &[u8]) {
 
 /******************** use of lib **********************/
 
-fn helper() {
-    // DEADLOCK here because Mutex is not re-entrant; we already locked inside
-    // the "frame" loop
-    let mut ctx = get_context();
-    ctx.gl += 1;
+fn helper(context: &mut Context) {
+    context.gl += 1;
+}
+
+fn fake_user_main(context: &mut Context) {
+    // Simulate game loop
+    for frame in 0..5 {
+        context.flush();
+        context.quad_context += 1;
+        helper(context);
+
+        resize_event(context, 1920., 1080.);
+        context.mouse_motion_event(42.0, 84.0);
+        touch_event(context, true, frame as f32, frame as f32);
+        load_sound_from_bytes(context, &[frame, frame]);
+        context.flush();
+    }
+    dbg!(context);
 }
 
 fn main() {
-    // Simulates Window::from_config()
-    // must be called before `get_context()`
-    init_context();
+    // construct context before calling user's main function
+    let mut context = Context::default();
 
-    // Simulate game loop
-    for frame in 0..5 {
-        let mut gl = get_context();
-        gl.flush();
-        gl.quad_context += 1;
-        helper();
-
-        resize_event(1920., 1080.);
-        mouse_motion_event(42.0, 84.0);
-        touch_event(true, frame as f32, frame as f32);
-        load_sound_from_bytes(&[frame, frame]);
-        gl.flush();
-    }
-    dbg!(&*get_context());
+    fake_user_main(&mut context);
 }

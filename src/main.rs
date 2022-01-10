@@ -1,82 +1,18 @@
 //! Simulates `get_internal_gl()` in macroquad
+#![deny(unsafe_code)]
 
-use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut};
 
 /******************** lib.rs **********************/
 
-/// Cell type that should be preferred over a `static mut` is better to use in a
-/// `static`
-///
-/// Based on [@Nemo157 comment](issue-53639)
-/// [issue-53639]: https://github.com/rust-lang/rust/issues/53639#issuecomment-790091647
-///
-/// # Safety
-///
-/// Mutable references must never alias (point to the same memory location).
-/// Any previous result from calling this method on a specific instance
-/// **must** be dropped before calling this function again. This applies
-/// even if the mutable refernces lives in the stack frame of another function.
-#[repr(transparent)]
-#[derive(Debug)]
-pub struct RacyCell<T>(UnsafeCell<T>);
-
-impl<T> RacyCell<T> {
-    #[inline(always)]
-    pub const fn new(value: T) -> Self {
-        RacyCell(UnsafeCell::new(value))
-    }
-
-    /// Get a shared reference to the inner type.
-    ///
-    /// # Safety
-    /// See [RacyCell]
-    #[inline(always)]
-    pub unsafe fn get_ref(&self) -> &T {
-        &*self.0.get()
-    }
-
-    /// Get a mutable reference to the inner type.
-    /// Callers should try to restrict the lifetime as much as possible.
-    ///
-    /// Callers may want to convert this result to a `*mut T` immediately.
-    ///
-    /// # Safety
-    /// See [RacyCell]
-    #[allow(clippy::mut_from_ref)]
-    #[inline(always)]
-    pub unsafe fn get_ref_mut(&self) -> &mut T {
-        &mut *self.0.get()
-    }
-
-    /// Get a const pointer to the inner type
-    ///
-    /// # Safety
-    /// See [RacyCell]
-    #[inline(always)]
-    pub unsafe fn get_ptr(&self) -> *const T {
-        self.0.get()
-    }
-
-    /// Get a mutable pointer to the inner type
-    ///
-    /// # Safety
-    /// See [RacyCell]
-    #[inline(always)]
-    pub unsafe fn get_ptr_mut(&self) -> *mut T {
-        self.0.get()
-    }
-}
-
-unsafe impl<T> Sync for RacyCell<T> {}
-
-#[no_mangle]
-static CONTEXT: RacyCell<Option<Context>> = RacyCell::new(None);
+/// parking_lot Mutext provides Sync and interior mutability
+static CONTEXT: parking_lot::Mutex<Option<Context>> = parking_lot::const_mutex(None);
 
 #[derive(Debug)]
 struct Context {
     // exposed to user via InternalContext
-    quad_context: u32,
-    gl: u32,
+    pub quad_context: u32,
+    pub gl: u32,
 
     // only accessed directly from library
     screen_width: f32,
@@ -104,6 +40,12 @@ impl Default for Context {
     }
 }
 
+impl Context {
+    pub fn flush(&mut self) {
+        self.perform_render_passes();
+    }
+}
+
 #[derive(Debug, Default)]
 struct AudioContext {
     sounds: Vec<u8>,
@@ -117,22 +59,16 @@ struct Touch {
     y: f32,
 }
 
-/// # Safety
-/// Requirements:
-/// - this function must only be called once from the "main" thread
-unsafe fn init_context() {
-    *CONTEXT.get_ref_mut() = Some(Context::default())
+fn init_context() {
+    *CONTEXT.lock() = Some(Context::default());
 }
 
-/// # Safety
-/// Requirements:
-/// - `init_context()` must be called before this function.
-/// - this function must only be called from the "main" thread
-unsafe fn get_context() -> *mut Context {
-    match CONTEXT.get_ref_mut() {
+fn get_context() -> impl Deref<Target = Context> + DerefMut {
+    let guard = CONTEXT.lock();
+    parking_lot::MutexGuard::map(guard, |opt| match opt {
         None => panic!(),
-        Some(x) => x,
-    }
+        Some(ctx) => ctx,
+    })
 }
 
 impl Context {
@@ -143,24 +79,19 @@ impl Context {
 }
 
 fn resize_event(width: f32, height: f32) {
-    unsafe {
-        let ctx = &mut *get_context();
+    let ctx = &mut *get_context();
 
-        // This would be UB because mouse_motion_event() mutates the underlying Context ctx mutable reference is live
-        //mouse_motion_event(0., 0.);
+    //mouse_motion_event(0., 0.);
 
-        ctx.screen_height = height;
-        ctx.screen_width = width;
-    }
-    // This is **not** UB because ctx mutable reference in this stack frame is no longer live
+    ctx.screen_height = height;
+    ctx.screen_width = width;
+
     //mouse_motion_event(0., 0.);
 }
 
 fn mouse_motion_event(x: f32, y: f32) {
-    unsafe {
-        (*get_context()).mouse_x = x;
-        (*get_context()).mouse_y = y;
-    }
+    (*get_context()).mouse_x = x;
+    (*get_context()).mouse_y = y;
 }
 
 /// Since we call another "macroquad" functions `mouse_motion_event()`, we MUST
@@ -168,7 +99,7 @@ fn mouse_motion_event(x: f32, y: f32) {
 fn touch_event(is_touch_started: bool, x: f32, y: f32) {
     let simulate_mouse_with_touch = {
         // SAFETY: no calls to other macroquad functions in scope
-        let context = unsafe { &mut *get_context() };
+        let context = &mut *get_context();
 
         context.touches.push(Touch {
             is_touch_started,
@@ -191,7 +122,7 @@ fn touch_event(is_touch_started: bool, x: f32, y: f32) {
     };
 
     // SAFETY: no calls to other macroquad functions in scope
-    let context = unsafe { &mut *get_context() };
+    let context = &mut *get_context();
 
     // context
     //     .input_events
@@ -204,70 +135,38 @@ fn touch_event(is_touch_started: bool, x: f32, y: f32) {
     });
 }
 
-/******************** window.rs **********************/
-pub struct InternalGlContext {
-    pub quad_context: *mut u32,
-    pub quad_gl: *mut u32,
-}
-
-impl InternalGlContext {
-    pub fn flush(&mut self) {
-        unsafe {
-            let c = &mut *get_context();
-            c.perform_render_passes();
-        }
-    }
-}
-
-/// # Safety
-/// Requirements:
-/// - this function must only be called from the "main" thread
-pub unsafe fn get_internal_gl() -> InternalGlContext {
-    let context = get_context();
-
-    InternalGlContext {
-        quad_context: &mut (*context).quad_context as *mut u32,
-        quad_gl: &mut (*context).gl as *mut u32,
-    }
-}
-
 /******************** audio.rs **********************/
 
 pub fn load_sound_from_bytes(data: &[u8]) {
     // SAFETY: no calls to other macroquad functions
-    let context = unsafe { &mut *get_context() };
+    let context = &mut *get_context();
 
     let audio_context = &mut context.audio_context;
     context.mouse_x += 1.0;
     audio_context.sounds.extend_from_slice(data);
     context.mouse_x += 1.0;
     audio_context.sounds.extend_from_slice(data);
-
 }
 
 /******************** use of lib **********************/
 
 fn helper() {
-    unsafe {
-        let gl = get_internal_gl();
-        *gl.quad_gl += 1;
-    }
+    // DEADLOCK here because Mutex is not re-entrant; we already locked inside
+    // the "frame" loop
+    let mut ctx = get_context();
+    ctx.gl += 1;
 }
 
 fn main() {
     // Simulates Window::from_config()
-    unsafe {
-        // must be called before `get_context()`
-        init_context();
-    }
+    // must be called before `get_context()`
+    init_context();
 
     // Simulate game loop
     for frame in 0..5 {
-        let mut gl = unsafe { get_internal_gl() };
+        let mut gl = get_context();
         gl.flush();
-        unsafe {
-            *gl.quad_context += 1;
-        }
+        gl.quad_context += 1;
         helper();
 
         resize_event(1920., 1080.);
@@ -276,7 +175,5 @@ fn main() {
         load_sound_from_bytes(&[frame, frame]);
         gl.flush();
     }
-    unsafe {
-        dbg!(&*get_context());
-    }
+    dbg!(&*get_context());
 }

@@ -1,4 +1,6 @@
-//! Simulates `get_internal_gl()` in macroquad
+//! This example passes the `Context` as a parameter and eliminates the need for
+//! a separate `InternalContext` struct. Instead, access is controlled via field
+//! visibility.
 #![deny(unsafe_code)]
 
 /******************** lib.rs **********************/
